@@ -1,0 +1,24 @@
+{
+  "name": "Quán Cơm POS - Hệ Thống Quản Lý Nhà Hàng",
+  "short_name": "Quán Cơm POS",
+  "description": "Phần mềm quản lý bán hàng, gọi món tại bàn, bếp KDS và chấm công nhà hàng",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#f59e0b",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/models/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/models/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

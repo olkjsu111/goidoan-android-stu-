@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">Quán Cơm POS</string>
+    <string name="app_subtitle">Gọi Món Tại Bàn &amp; Quản Lý Nhà Hàng</string>
+    <string name="default_server_url">https://quancom-pos.vercel.app</string>
+    <string name="local_emulator_url">http://10.0.2.2:3000</string>
+    <string name="local_wifi_url">http://192.168.1.7:3000</string>
+    <string name="error_offline_title">Không thể kết nối đến máy chủ POS</string>
+    <string name="error_offline_desc">Vui lòng kiểm tra kết nối mạng Wi-Fi hoặc đảm bảo máy chủ POS đang hoạt động.</string>
+    <string name="btn_retry">Thử kết nối lại</string>
+    <string name="btn_change_server">Đổi máy chủ POS</string>
+    <string name="press_again_to_exit">Nhấn BACK lần nữa để thoát</string>
+    <string name="btn_complete_checkout">HOÀN TẤT THANH TOÁN</string>
+</resources>

@@ -1,0 +1,33 @@
+{
+	"appId": "com.quancom.pos",
+	"appName": "Quán Cơm POS",
+	"webDir": "public",
+	"server": {
+		"url": "https://quancom-pos.vercel.app",
+		"cleartext": true
+	},
+	"plugins": {
+		"SplashScreen": {
+			"launchShowDuration": 1500,
+			"launchAutoHide": true,
+			"backgroundColor": "#09090b",
+			"androidScaleType": "CENTER_CROP",
+			"showSpinner": true,
+			"spinnerColor": "#f59e0b"
+		},
+		"StatusBar": {
+			"backgroundColor": "#09090b",
+			"style": "DARK"
+		},
+		"Keyboard": {
+			"resize": "body",
+			"style": "DARK",
+			"resizeOnFullScreen": true
+		}
+	},
+	"android": {
+		"allowMixedContent": true,
+		"captureInput": true,
+		"webContentsDebuggingEnabled": true
+	}
+}
