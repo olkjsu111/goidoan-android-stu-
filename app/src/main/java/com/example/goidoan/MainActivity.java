@@ -46,10 +46,13 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 import androidx.core.splashscreen.SplashScreen;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewFeature;
 
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Collections;
 
 import com.example.goidoan.model.MenuItem;
 import com.example.goidoan.model.OrderItem;
@@ -257,6 +260,12 @@ public class MainActivity extends AppCompatActivity {
 
         // JavaScript Bridge for Native Integration
         webView.addJavascriptInterface(new AndroidBridge(this), "Android");
+        // Install before website scripts can create/revoke Blob URLs or cache anchor methods.
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            WebViewCompat.addDocumentStartJavaScript(webView,
+                    ExcelExportHelper.getInjectedDownloadScript(this) + "\n" + QrPaymentHelper.getInjectedQrScript(this),
+                    Collections.singleton("*"));
+        }
 
         // Download Listener to capture Excel & File Downloads
         webView.setDownloadListener(new DownloadListener() {
@@ -267,10 +276,9 @@ public class MainActivity extends AppCompatActivity {
 
                 if (url.startsWith("blob:")) {
                     // Blob URLs cannot be directly downloaded by DownloadManager; fetch via JS FileReader
-                    String safeUrl = url.replace("'", "\\'");
                     String guessFilename = URLUtil.guessFileName(url, contentDisposition, mimetype);
-                    String script = "if (window.__androidFetchAndDownloadBlob) { window.__androidFetchAndDownloadBlob('"
-                            + safeUrl + "', '" + guessFilename + "', '" + mimetype + "'); }";
+                    String script = "if (window.__androidFetchAndDownloadBlob) { window.__androidFetchAndDownloadBlob("
+                            + JSONObject.quote(url) + "," + JSONObject.quote(guessFilename) + "," + JSONObject.quote(mimetype == null ? "" : mimetype) + "); }";
                     webView.evaluateJavascript(script, null);
                 } else if (url.startsWith("data:")) {
                     String guessFilename = URLUtil.guessFileName(url, contentDisposition, mimetype);
@@ -331,8 +339,8 @@ public class MainActivity extends AppCompatActivity {
                 }
                 // Inject Excel export hooks progressively during page rendering
                 if (newProgress >= 50) {
-                    view.evaluateJavascript(ExcelExportHelper.getInjectedDownloadScript(), null);
-                    view.evaluateJavascript(QrPaymentHelper.getInjectedQrScript(), null);
+                    view.evaluateJavascript(ExcelExportHelper.getInjectedDownloadScript(MainActivity.this), null);
+                    view.evaluateJavascript(QrPaymentHelper.getInjectedQrScript(MainActivity.this), null);
                 }
             }
 
@@ -355,6 +363,7 @@ public class MainActivity extends AppCompatActivity {
                 if ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) {
                     return false; // Load inside WebView
                 }
+                if ("blob".equalsIgnoreCase(scheme) || "data".equalsIgnoreCase(scheme)) return false;
 
                 // Handle external apps (tel, mailto, vietqr, intent, momo, zalopay...)
                 try {
@@ -372,8 +381,8 @@ public class MainActivity extends AppCompatActivity {
                 isPageError = false;
                 progressBar.setVisibility(View.VISIBLE);
                 // Pre-inject hook for any early scripts
-                view.evaluateJavascript(ExcelExportHelper.getInjectedDownloadScript(), null);
-                view.evaluateJavascript(QrPaymentHelper.getInjectedQrScript(), null);
+                view.evaluateJavascript(ExcelExportHelper.getInjectedDownloadScript(MainActivity.this), null);
+                view.evaluateJavascript(QrPaymentHelper.getInjectedQrScript(MainActivity.this), null);
             }
 
             @Override
@@ -384,8 +393,8 @@ public class MainActivity extends AppCompatActivity {
                     hideErrorView();
                 }
                 // Inject Excel export & QR interceptors on finished page
-                view.evaluateJavascript(ExcelExportHelper.getInjectedDownloadScript(), null);
-                view.evaluateJavascript(QrPaymentHelper.getInjectedQrScript(), null);
+                view.evaluateJavascript(ExcelExportHelper.getInjectedDownloadScript(MainActivity.this), null);
+                view.evaluateJavascript(QrPaymentHelper.getInjectedQrScript(MainActivity.this), null);
             }
 
             @Override
@@ -523,33 +532,42 @@ public class MainActivity extends AppCompatActivity {
         }
 
         @JavascriptInterface
+        public void exportTable(String rowsJson, String filename) {
+            ExcelExportHelper.exportTable(activity, rowsJson, filename);
+        }
+
+        @JavascriptInterface
         public void downloadBase64File(String base64Data, String filename, String mimeType) {
             ExcelExportHelper.saveAndOpenFile(activity, base64Data, filename, mimeType);
         }
 
         @JavascriptInterface
         public void downloadUrl(String url, String filename, String mimeType) {
-            ExcelExportHelper.downloadHttpFile(activity, url, null, null, mimeType);
+            ExcelExportHelper.downloadHttpFile(activity, url, null, null, mimeType, filename);
         }
 
         @JavascriptInterface
         public void openFile(String filename) {
+            activity.runOnUiThread(() -> {
             File file = new File(activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), filename);
             if (file.exists()) {
                 ExcelExportHelper.openFile(activity, file, ExcelExportHelper.EXCEL_MIME);
             } else {
                 showToast("Không tìm thấy file: " + filename);
             }
+            });
         }
 
         @JavascriptInterface
         public void shareFile(String filename) {
+            activity.runOnUiThread(() -> {
             File file = new File(activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), filename);
             if (file.exists()) {
                 ExcelExportHelper.shareFile(activity, file, ExcelExportHelper.EXCEL_MIME);
             } else {
                 showToast("Không tìm thấy file: " + filename);
             }
+            });
         }
 
         @JavascriptInterface

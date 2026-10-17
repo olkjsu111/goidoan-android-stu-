@@ -38,65 +38,16 @@ public class QrPaymentHelper {
         return "";
     }
 
-    public static String getInjectedQrScript() {
-        return "(function() {\n" +
-                "  if (window.__qrPaymentPatcherInstalled) return;\n" +
-                "  window.__qrPaymentPatcherInstalled = true;\n" +
-                "\n" +
-                "  function patchModal() {\n" +
-                "    // 1. Thay thế số tài khoản & tên ngân hàng cũ trong toàn bộ DOM\n" +
-                "    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);\n" +
-                "    var node;\n" +
-                "    while ((node = walker.nextNode())) {\n" +
-                "      var txt = node.nodeValue;\n" +
-                "      if (txt) {\n" +
-                "        if (txt.indexOf('1903666888999') !== -1) {\n" +
-                "          node.nodeValue = txt.replace(/1903666888999/g, '" + ACCOUNT_NO + "');\n" +
-                "        }\n" +
-                "        if (txt.indexOf('Techcombank') !== -1 || txt.indexOf('TCB') !== -1) {\n" +
-                "          node.nodeValue = node.nodeValue.replace(/Techcombank\\s*\\(TCB\\)/g, '" + BANK_ID + "')\n" +
-                "                                         .replace(/Techcombank/g, '" + BANK_ID + "')\n" +
-                "                                         .replace(/\\bTCB\\b/g, '" + BANK_ID + "');\n" +
-                "        }\n" +
-                "        if (txt.indexOf('QUAN COM TAM SAIGON') !== -1) {\n" +
-                "          node.nodeValue = node.nodeValue.replace(/QUAN COM TAM SAIGON/g, '" + ACCOUNT_NAME + "');\n" +
-                "        }\n" +
-                "      }\n" +
-                "    }\n" +
-                "\n" +
-                "    // 2. Thay thế ảnh QR của modal web bằng ảnh my_qr của người dùng\n" +
-                "    var imgs = document.querySelectorAll('img');\n" +
-                "    for (var i = 0; i < imgs.length; i++) {\n" +
-                "      var img = imgs[i];\n" +
-                "      var src = img.getAttribute('src') || '';\n" +
-                "      if (src.indexOf('vietqr.io') !== -1 || src.indexOf('TCB-1903666888999') !== -1 || (img.alt && img.alt.indexOf('VietQR') !== -1)) {\n" +
-                "        if (window.Android && window.Android.getQrBase64) {\n" +
-                "          var userQr = window.Android.getQrBase64();\n" +
-                "          if (userQr && src !== userQr) {\n" +
-                "            img.src = userQr;\n" +
-                "            img.style.objectFit = 'contain';\n" +
-                "          }\n" +
-                "        }\n" +
-                "      }\n" +
-                "    }\n" +
-                "  }\n" +
-                "\n" +
-                "  // Lắng nghe click để mở Native PaymentDialog khi bấm Tính Tiền\n" +
-                "  document.addEventListener('click', function(e) {\n" +
-                "    var btn = e.target.closest('button');\n" +
-                "    if (btn && btn.textContent && btn.textContent.indexOf('TÍNH TIỀN') !== -1) {\n" +
-                "      // Trích xuất mã bàn nếu có\n" +
-                "      var titleEl = document.querySelector('h3, [class*=\"font-bold\"]');\n" +
-                "      var tableName = titleEl ? titleEl.textContent : 'Bàn';\n" +
-                "      if (window.Android && window.Android.openPaymentDialog) {\n" +
-                "        // Cho phép mở song song Native Payment Dialog của Android Studio\n" +
-                "        window.Android.openPaymentDialog('T01', tableName, 0, '[]');\n" +
-                "      }\n" +
-                "    }\n" +
-                "  }, true);\n" +
-                "\n" +
-                "  // Tự động kiểm tra và thay thế liên tục khi modal hiển thị\n" +
-                "  setInterval(patchModal, 400);\n" +
-                "})();";
+    public static String getInjectedQrScript(Context context) {
+        try {
+            org.json.JSONObject config = new org.json.JSONObject();
+            config.put("bankId", BANK_ID);
+            config.put("accountNo", ACCOUNT_NO);
+            config.put("accountName", ACCOUNT_NAME);
+            return WebBridgeScripts.read(context, "payment-bridge.js")
+                    .replace("__ANDROID_PAYMENT_CONFIG__", config.toString());
+        } catch (org.json.JSONException e) {
+            throw new IllegalStateException("Invalid payment configuration", e);
+        }
     }
 }

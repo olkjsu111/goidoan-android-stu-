@@ -7,6 +7,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
 import android.content.ContentValues;
+import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -32,11 +33,16 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.OutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import org.json.JSONArray;
 
 public class ExcelExportHelper {
 
@@ -76,46 +82,23 @@ public class ExcelExportHelper {
 
         EXECUTOR.execute(() -> {
             try {
-                // 1. Clean Base64 payload
                 String cleanBase64 = base64OrDataUrl;
-                if (cleanBase64.contains(",")) {
-                    cleanBase64 = cleanBase64.substring(cleanBase64.indexOf(",") + 1);
+                String resolvedMime = mimeType;
+                byte[] fileBytes;
+                if (cleanBase64.startsWith("data:")) {
+                    int separator = cleanBase64.indexOf(',');
+                    if (separator < 0) throw new IllegalArgumentException("Data URL không hợp lệ");
+                    String header = cleanBase64.substring(5, separator);
+                    String dataMime = header.split(";", 2)[0];
+                    if (!dataMime.isEmpty() && !"application/octet-stream".equals(dataMime)) resolvedMime = dataMime;
+                    String payload = cleanBase64.substring(separator + 1);
+                    fileBytes = header.contains(";base64")
+                            ? Base64.decode(payload, Base64.DEFAULT)
+                            : Uri.decode(payload).getBytes(StandardCharsets.UTF_8);
+                } else {
+                    fileBytes = Base64.decode(cleanBase64, Base64.DEFAULT);
                 }
-                cleanBase64 = cleanBase64.replaceAll("\\s+", "");
-
-                byte[] fileBytes = Base64.decode(cleanBase64, Base64.DEFAULT);
-                if (fileBytes == null || fileBytes.length == 0) {
-                    throw new IllegalArgumentException("Dữ liệu file Base64 rỗng");
-                }
-
-                // 2. Format filename
-                String safeName = sanitizeFilename(filename, mimeType);
-
-                // 3. Save to app-specific external files dir (reliable for FileProvider)
-                File appDownloadsDir = activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
-                if (appDownloadsDir == null) {
-                    appDownloadsDir = activity.getFilesDir();
-                }
-                if (!appDownloadsDir.exists()) {
-                    appDownloadsDir.mkdirs();
-                }
-
-                File localFile = new File(appDownloadsDir, safeName);
-                try (FileOutputStream fos = new FileOutputStream(localFile)) {
-                    fos.write(fileBytes);
-                    fos.flush();
-                }
-
-                // 4. Also copy to device public Downloads directory so user sees it in Files app
-                saveToPublicDownloads(activity, fileBytes, safeName, mimeType);
-
-                Log.i(TAG, "File Excel saved successfully: " + localFile.getAbsolutePath() + " (" + fileBytes.length + " bytes)");
-
-                // 5. Post notification and interactive dialog
-                MAIN_HANDLER.post(() -> {
-                    showSuccessNotification(activity, localFile, safeName, mimeType);
-                    showSuccessDialog(activity, localFile, safeName, mimeType);
-                });
+                saveBytesAndNotify(activity, fileBytes, filename, resolvedMime);
 
             } catch (Exception e) {
                 Log.e(TAG, "Failed to save Excel file: " + e.getMessage(), e);
@@ -126,7 +109,47 @@ public class ExcelExportHelper {
         });
     }
 
-    private static void saveToPublicDownloads(Context context, byte[] bytes, String filename, String mimeType) {
+    public static void exportTable(Activity activity, String rowsJson, String filename) {
+        EXECUTOR.execute(() -> {
+            try {
+                JSONArray array = new JSONArray(rowsJson);
+                if (array.length() == 0) throw new IllegalArgumentException("Bảng hóa đơn rỗng");
+                List<List<String>> rows = new ArrayList<>();
+                for (int r = 0; r < array.length(); r++) {
+                    JSONArray cells = array.getJSONArray(r);
+                    List<String> row = new ArrayList<>();
+                    for (int c = 0; c < cells.length(); c++) row.add(cells.optString(c, ""));
+                    rows.add(row);
+                }
+                saveBytesAndNotify(activity, ExcelWorkbookWriter.write(rows), filename, EXCEL_MIME);
+            } catch (Exception e) {
+                Log.e(TAG, "Cannot export reports table", e);
+                MAIN_HANDLER.post(() -> Toast.makeText(activity, "Lỗi xuất Excel: " + e.getMessage(), Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private static void saveBytesAndNotify(Activity activity, byte[] bytes, String filename, String mimeType) throws IOException {
+        if (bytes.length == 0) throw new IllegalArgumentException("Dữ liệu file rỗng");
+        String safeName = sanitizeFilename(filename, mimeType);
+        File directory = activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+        if (directory == null) directory = activity.getFilesDir();
+        if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("Không tạo được thư mục lưu file");
+        File file = new File(directory, safeName);
+        try (FileOutputStream output = new FileOutputStream(file)) { output.write(bytes); }
+        String resolvedMime = mimeType == null || mimeType.isEmpty() || "application/octet-stream".equals(mimeType)
+                ? (safeName.toLowerCase(Locale.ROOT).endsWith(".csv") ? "text/csv" : EXCEL_MIME) : mimeType;
+        String fileMime = resolvedMime.split(";", 2)[0].trim();
+        boolean publicSaved = saveToPublicDownloads(activity, bytes, safeName, fileMime);
+        Log.i(TAG, "File saved: " + file.getAbsolutePath() + " (" + bytes.length + " bytes), public Downloads: " + publicSaved);
+        MAIN_HANDLER.post(() -> {
+            showSuccessNotification(activity, file, safeName, fileMime, publicSaved);
+            showSuccessDialog(activity, file, safeName, fileMime, publicSaved);
+        });
+    }
+
+    private static boolean saveToPublicDownloads(Context context, byte[] bytes, String filename, String mimeType) {
+        Uri pendingUri = null;
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 // Android 10+ MediaStore.Downloads (No WRITE_EXTERNAL_STORAGE required)
@@ -137,16 +160,17 @@ public class ExcelExportHelper {
                 values.put(MediaStore.Downloads.IS_PENDING, 1);
 
                 Uri uri = context.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                pendingUri = uri;
                 if (uri != null) {
                     try (OutputStream out = context.getContentResolver().openOutputStream(uri)) {
-                        if (out != null) {
-                            out.write(bytes);
-                            out.flush();
-                        }
+                        if (out == null) throw new IOException("Không mở được thư mục Downloads");
+                        out.write(bytes);
+                        out.flush();
                     }
                     values.clear();
                     values.put(MediaStore.Downloads.IS_PENDING, 0);
-                    context.getContentResolver().update(uri, values, null, null);
+                    if (context.getContentResolver().update(uri, values, null, null) < 1) throw new IOException("Không hoàn tất lưu file");
+                    return true;
                 }
             } else {
                 // Android 9 and lower: Public Downloads folder
@@ -163,16 +187,28 @@ public class ExcelExportHelper {
                             new String[]{mimeType},
                             null
                     );
+                    return true;
                 }
             }
         } catch (Exception e) {
             Log.w(TAG, "Could not save secondary copy to public Downloads: " + e.getMessage());
+            if (pendingUri != null) {
+                try { context.getContentResolver().delete(pendingUri, null, null); }
+                catch (Exception cleanup) { Log.w(TAG, "Cannot remove incomplete download", cleanup); }
+            }
         }
+        return false;
     }
 
     public static void downloadHttpFile(Activity activity, String url, String userAgent, String contentDisposition, String mimeType) {
+        downloadHttpFile(activity, url, userAgent, contentDisposition, mimeType, null);
+    }
+
+    public static void downloadHttpFile(Activity activity, String url, String userAgent, String contentDisposition, String mimeType, String requestedFilename) {
+        MAIN_HANDLER.post(() -> {
         try {
-            String filename = URLUtil.guessFileName(url, contentDisposition, mimeType);
+            String filename = requestedFilename == null || requestedFilename.isEmpty()
+                    ? URLUtil.guessFileName(url, contentDisposition, mimeType) : requestedFilename;
             filename = sanitizeFilename(filename, mimeType);
 
             DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
@@ -200,12 +236,13 @@ public class ExcelExportHelper {
             Log.e(TAG, "HTTP DownloadManager error: " + e.getMessage(), e);
             Toast.makeText(activity, "Lỗi khi bắt đầu tải: " + e.getMessage(), Toast.LENGTH_SHORT).show();
         }
+        });
     }
 
     private static String sanitizeFilename(String filename, String mimeType) {
         if (filename == null || filename.trim().isEmpty()) {
             String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
-            filename = "BaoCao_GoiMon_" + timeStamp + ".xlsx";
+            filename = "BaoCao_GoiMon_" + timeStamp;
         }
 
         // Remove dangerous characters
@@ -216,6 +253,12 @@ public class ExcelExportHelper {
         if (!lower.endsWith(".xlsx") && !lower.endsWith(".xls") && !lower.endsWith(".csv") && !lower.endsWith(".pdf") && !lower.endsWith(".docx")) {
             if (mimeType != null && mimeType.contains("csv")) {
                 filename += ".csv";
+            } else if (mimeType != null && mimeType.contains("pdf")) {
+                filename += ".pdf";
+            } else if ("application/vnd.ms-excel".equals(mimeType)) {
+                filename += ".xls";
+            } else if (mimeType != null && mimeType.contains("wordprocessingml")) {
+                filename += ".docx";
             } else {
                 filename += ".xlsx";
             }
@@ -223,12 +266,14 @@ public class ExcelExportHelper {
         return filename;
     }
 
-    private static void showSuccessDialog(Activity activity, File file, String filename, String mimeType) {
+    private static void showSuccessDialog(Activity activity, File file, String filename, String mimeType, boolean publicSaved) {
         if (activity.isFinishing() || activity.isDestroyed()) return;
 
         new MaterialAlertDialogBuilder(activity)
                 .setTitle("📊 Xuất File Excel Thành Công!")
-                .setMessage("Tên file: " + filename + "\n\nFile đã được lưu vào thư mục Downloads của máy.\nBạn có muốn mở file ngay không?")
+                .setMessage("Tên file: " + filename + "\n\n" + (publicSaved
+                        ? "Đã lưu vào Downloads/GoiMonPOS của máy."
+                        : "Đã lưu trong ứng dụng. Chưa chép được vào Downloads; bạn có thể mở hoặc chia sẻ file bên dưới."))
                 .setPositiveButton("Mở file ngay", (dialog, which) -> openFile(activity, file, mimeType))
                 .setNeutralButton("Chia sẻ (Zalo/Mail)", (dialog, which) -> shareFile(activity, file, mimeType))
                 .setNegativeButton("Đóng", null)
@@ -245,6 +290,7 @@ public class ExcelExportHelper {
 
             Intent intent = new Intent(Intent.ACTION_VIEW);
             intent.setDataAndType(contentUri, mimeType != null ? mimeType : EXCEL_MIME);
+            intent.setClipData(ClipData.newUri(activity.getContentResolver(), file.getName(), contentUri));
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
 
@@ -268,6 +314,7 @@ public class ExcelExportHelper {
             Intent shareIntent = new Intent(Intent.ACTION_SEND);
             shareIntent.setType(mimeType != null ? mimeType : EXCEL_MIME);
             shareIntent.putExtra(Intent.EXTRA_STREAM, contentUri);
+            shareIntent.setClipData(ClipData.newUri(activity.getContentResolver(), file.getName(), contentUri));
             shareIntent.putExtra(Intent.EXTRA_SUBJECT, "Báo cáo: " + file.getName());
             shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
 
@@ -278,7 +325,7 @@ public class ExcelExportHelper {
         }
     }
 
-    private static void showSuccessNotification(Context context, File file, String filename, String mimeType) {
+    private static void showSuccessNotification(Context context, File file, String filename, String mimeType, boolean publicSaved) {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 if (ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -320,7 +367,8 @@ public class ExcelExportHelper {
                     .setSmallIcon(android.R.drawable.stat_sys_download_done)
                     .setContentTitle("Xuất file Excel thành công")
                     .setContentText(filename)
-                    .setStyle(new NotificationCompat.BigTextStyle().bigText("Đã lưu: " + filename + "\nVào thư mục Downloads trên máy."))
+                    .setStyle(new NotificationCompat.BigTextStyle().bigText("Đã lưu: " + filename + (publicSaved
+                            ? "\nVào thư mục Downloads/GoiMonPOS trên máy." : "\nFile được lưu trong ứng dụng; có thể mở hoặc chia sẻ.")))
                     .setPriority(NotificationCompat.PRIORITY_HIGH)
                     .setAutoCancel(true)
                     .setContentIntent(openPendingIntent)
@@ -336,151 +384,7 @@ public class ExcelExportHelper {
         }
     }
 
-    /**
-     * JavaScript injection script to hook Blob/Data URLs, HTMLAnchorElement click,
-     * and add Excel export helper buttons if needed.
-     */
-    public static String getInjectedDownloadScript() {
-        return "(function() {\n" +
-                "    if (window.__androidExcelBridgeInitialized) return;\n" +
-                "    window.__androidExcelBridgeInitialized = true;\n" +
-                "    console.log('[AndroidBridge] Initializing Excel & File Download interceptors');\n" +
-                "\n" +
-                "    window.__androidFetchAndDownloadBlob = function(blobUrl, fileName, mimeType) {\n" +
-                "        fileName = fileName || ('BaoCao_POS_' + Date.now() + '.xlsx');\n" +
-                "        mimeType = mimeType || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';\n" +
-                "        fetch(blobUrl)\n" +
-                "            .then(function(res) { return res.blob(); })\n" +
-                "            .then(function(blob) {\n" +
-                "                var reader = new FileReader();\n" +
-                "                reader.onloadend = function() {\n" +
-                "                    var base64data = reader.result;\n" +
-                "                    if (window.Android && window.Android.downloadBase64File) {\n" +
-                "                        window.Android.downloadBase64File(base64data, fileName, blob.type || mimeType);\n" +
-                "                    }\n" +
-                "                };\n" +
-                "                reader.readAsDataURL(blob);\n" +
-                "            })\n" +
-                "            .catch(function(err) {\n" +
-                "                console.error('[AndroidBridge] Failed to read blob data:', err);\n" +
-                "                if (window.Android && window.Android.showToast) {\n" +
-                "                    window.Android.showToast('Lỗi đọc file: ' + err.message);\n" +
-                "                }\n" +
-                "            });\n" +
-                "    };\n" +
-                "\n" +
-                "    // 1. Hook HTMLAnchorElement.prototype.click (catches SheetJS XLSX.writeFile, FileSaver.js)\n" +
-                "    var originalAnchorClick = HTMLAnchorElement.prototype.click;\n" +
-                "    HTMLAnchorElement.prototype.click = function() {\n" +
-                "        var href = this.getAttribute('href') || this.href || '';\n" +
-                "        var download = this.getAttribute('download') || this.download || '';\n" +
-                "        var isFileDownload = download || href.startsWith('blob:') || href.startsWith('data:') || /\\.(xlsx|xls|csv|pdf|docx)($|\\?)/i.test(href);\n" +
-                "\n" +
-                "        if (isFileDownload) {\n" +
-                "            var fileName = download || ('BaoCao_' + Date.now() + '.xlsx');\n" +
-                "            if (!/\\.[a-zA-Z0-9]+$/.test(fileName)) {\n" +
-                "                fileName += '.xlsx';\n" +
-                "            }\n" +
-                "            var mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';\n" +
-                "\n" +
-                "            if (href.startsWith('blob:')) {\n" +
-                "                window.__androidFetchAndDownloadBlob(href, fileName, mimeType);\n" +
-                "                return; // Intercepted, avoid unhandled WebView navigation\n" +
-                "            } else if (href.startsWith('data:')) {\n" +
-                "                if (window.Android && window.Android.downloadBase64File) {\n" +
-                "                    window.Android.downloadBase64File(href, fileName, mimeType);\n" +
-                "                }\n" +
-                "                return;\n" +
-                "            } else if (href.startsWith('http://') || href.startsWith('https://')) {\n" +
-                "                if (window.Android && window.Android.downloadUrl) {\n" +
-                "                    window.Android.downloadUrl(href, fileName, mimeType);\n" +
-                "                    return;\n" +
-                "                }\n" +
-                "            }\n" +
-                "        }\n" +
-                "        return originalAnchorClick.apply(this, arguments);\n" +
-                "    };\n" +
-                "\n" +
-                "    // 2. Intercept document click events in capture phase\n" +
-                "    document.addEventListener('click', function(e) {\n" +
-                "        var target = e.target;\n" +
-                "        while (target && target.tagName !== 'A') {\n" +
-                "            target = target.parentElement;\n" +
-                "        }\n" +
-                "        if (target && target.tagName === 'A') {\n" +
-                "            var href = target.getAttribute('href') || target.href || '';\n" +
-                "            var download = target.getAttribute('download') || target.download || '';\n" +
-                "            if (download || href.startsWith('blob:') || href.startsWith('data:') || /\\.(xlsx|xls|csv)($|\\?)/i.test(href)) {\n" +
-                "                if (href.startsWith('blob:')) {\n" +
-                "                    e.preventDefault();\n" +
-                "                    e.stopPropagation();\n" +
-                "                    var fileName = download || ('BaoCao_' + Date.now() + '.xlsx');\n" +
-                "                    window.__androidFetchAndDownloadBlob(href, fileName, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');\n" +
-                "                } else if (href.startsWith('data:')) {\n" +
-                "                    e.preventDefault();\n" +
-                "                    e.stopPropagation();\n" +
-                "                    var fileName = download || ('BaoCao_' + Date.now() + '.xlsx');\n" +
-                "                    if (window.Android && window.Android.downloadBase64File) {\n" +
-                "                        window.Android.downloadBase64File(href, fileName, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');\n" +
-                "                    }\n" +
-                "                }\n" +
-                "            }\n" +
-                "        }\n" +
-                "    }, true);\n" +
-                "\n" +
-                "    // 3. Inject Helper Button for Receipts Reports if on /admin/reports\n" +
-                "    function checkAndInjectReportsExportButton() {\n" +
-                "        if (window.location.pathname.indexOf('/admin/reports') !== -1) {\n" +
-                "            var existingBtn = document.getElementById('btn-android-export-reports');\n" +
-                "            if (!existingBtn) {\n" +
-                "                var searchInput = document.querySelector('input[placeholder*=\"hóa đơn\"]') || document.querySelector('input[type=\"text\"]');\n" +
-                "                if (searchInput && searchInput.parentElement && searchInput.parentElement.parentElement) {\n" +
-                "                    var container = searchInput.parentElement.parentElement;\n" +
-                "                    var btn = document.createElement('button');\n" +
-                "                    btn.id = 'btn-android-export-reports';\n" +
-                "                    btn.type = 'button';\n" +
-                "                    btn.innerHTML = '📊 XUẤT EXCEL HÓA ĐƠN';\n" +
-                "                    btn.style.cssText = 'margin-left: 10px; background: #059669; color: white; border: none; padding: 7px 14px; border-radius: 10px; font-weight: bold; font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 4px 12px rgba(5,150,105,0.3);';\n" +
-                "                    btn.onclick = function() {\n" +
-                "                        exportReportsTableToExcel();\n" +
-                "                    };\n" +
-                "                    container.style.display = 'flex';\n" +
-                "                    container.style.alignItems = 'center';\n" +
-                "                    container.style.justifyContent = 'space-between';\n" +
-                "                    container.appendChild(btn);\n" +
-                "                }\n" +
-                "            }\n" +
-                "        }\n" +
-                "    }\n" +
-                "\n" +
-                "    function exportReportsTableToExcel() {\n" +
-                "        var table = document.querySelector('table');\n" +
-                "        if (!table) {\n" +
-                "            if (window.Android && window.Android.showToast) window.Android.showToast('Không tìm thấy bảng hóa đơn để xuất');\n" +
-                "            return;\n" +
-                "        }\n" +
-                "        var rows = table.querySelectorAll('tr');\n" +
-                "        var csv = '\\uFEFF'; // UTF-8 BOM\n" +
-                "        csv += 'BÁO CÁO NHẬT KÝ HÓA ĐƠN - QUÁN CƠM POS\\r\\n';\n" +
-                "        csv += 'Ngày xuất: ' + new Date().toLocaleString('vi-VN') + '\\r\\n\\r\\n';\n" +
-                "        rows.forEach(function(row) {\n" +
-                "            var cols = row.querySelectorAll('th, td');\n" +
-                "            var rowData = [];\n" +
-                "            for (var i = 0; i < cols.length - 1; i++) { // Skip the last action column\n" +
-                "                var text = (cols[i].innerText || '').replace(/\\r?\\n/g, ' ').replace(/\"/g, '\"\"').trim();\n" +
-                "                rowData.push('\"' + text + '\"');\n" +
-                "            }\n" +
-                "            if (rowData.length > 0) csv += rowData.join(',') + '\\r\\n';\n" +
-                "        });\n" +
-                "        var base64 = btoa(unescape(encodeURIComponent(csv)));\n" +
-                "        var dataUrl = 'data:text/csv;charset=utf-8;base64,' + base64;\n" +
-                "        var fileName = 'BaoCao_HoaDon_' + new Date().toISOString().split('T')[0] + '.csv';\n" +
-                "        if (window.Android && window.Android.downloadBase64File) {\n" +
-                "            window.Android.downloadBase64File(dataUrl, fileName, 'text/csv');\n" +
-                "        }\n" +
-                "    }\n" +
-                "\n" +
-                "    setInterval(checkAndInjectReportsExportButton, 1500);\n" +
-                "})();";
+    public static String getInjectedDownloadScript(Context context) {
+        return WebBridgeScripts.read(context, "download-bridge.js");
     }
 }
